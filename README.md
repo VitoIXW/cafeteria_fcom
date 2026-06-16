@@ -4,13 +4,6 @@ Script en Python para leer el menú diario del comedor de la Universidad de Sevi
 
 Ahora también puede mantener una lista local de suscriptores de Telegram para que el menú se envíe a varias personas.
 
-## Qué he comprobado de la web
-
-- La página publica un único bloque semanal en HTML estático.
-- Hoy, 16/06/2026, el contenido publicado corresponde a `Menú semanal: 15/06/2026 - 19/06/2026`.
-- Cada día aparece en una tabla con tres columnas: `Primer plato`, `Segundo plato` y `Postre`.
-
-Eso permite sacar el menú sin navegador ni JavaScript.
 
 ## Uso local
 
