@@ -17,6 +17,8 @@ from typing import Iterable
 DEFAULT_MENU_URL = "https://sacu.us.es/menuSemanal?i=1"
 USER_AGENT = "comedor-bot/1.0 (+https://sacu.us.es/menuSemanal?i=1)"
 DEFAULT_ENV_PATH = ".env"
+DEFAULT_SUBSCRIBERS_PATH = "subscribers.json"
+DEFAULT_STATE_PATH = "bot_state.json"
 
 
 @dataclass(frozen=True)
@@ -33,6 +35,10 @@ class WeeklyMenu:
     campus: str
     week_label: str
     days: list[DayMenu]
+
+
+def now_iso() -> str:
+    return datetime.now().isoformat(timespec="seconds")
 
 
 def fetch_url(url: str) -> str:
@@ -173,16 +179,132 @@ def load_env_file(env_path: str) -> None:
             os.environ.setdefault(key, value)
 
 
-def send_telegram_message(bot_token: str, chat_id: str, text: str) -> None:
-    payload = urllib.parse.urlencode(
-        {
-            "chat_id": chat_id,
-            "text": text,
-            "parse_mode": "HTML",
-            "disable_web_page_preview": "true",
-        }
-    ).encode("utf-8")
-    endpoint = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+def load_json_file(path: str, default: dict) -> dict:
+    if not os.path.exists(path):
+        return json.loads(json.dumps(default))
+    with open(path, "r", encoding="utf-8") as file_handle:
+        return json.load(file_handle)
+
+
+def save_json_file(path: str, payload: dict) -> None:
+    with open(path, "w", encoding="utf-8") as file_handle:
+        json.dump(payload, file_handle, ensure_ascii=False, indent=2)
+        file_handle.write("\n")
+
+
+def normalize_command(text: str) -> str:
+    command = text.strip().split()[0].lower()
+    return command.split("@", 1)[0]
+
+
+def build_subscriber(chat_id: str, name: str, username: str | None, active: bool, source: str) -> dict:
+    return {
+        "chat_id": str(chat_id),
+        "name": name,
+        "username": username or "",
+        "active": active,
+        "source": source,
+        "updated_at": now_iso(),
+    }
+
+
+def upsert_subscriber(subscribers: list[dict], chat_id: str, name: str, username: str | None, active: bool, source: str) -> None:
+    chat_id = str(chat_id)
+    for subscriber in subscribers:
+        if str(subscriber.get("chat_id")) == chat_id:
+            subscriber["name"] = name
+            subscriber["username"] = username or ""
+            subscriber["active"] = active
+            subscriber["source"] = source
+            subscriber["updated_at"] = now_iso()
+            return
+    subscribers.append(build_subscriber(chat_id=chat_id, name=name, username=username, active=active, source=source))
+
+
+def ensure_default_subscriber(subscribers: list[dict], default_chat_id: str | None) -> None:
+    if not default_chat_id:
+        return
+
+    for subscriber in subscribers:
+        if str(subscriber.get("chat_id")) == str(default_chat_id):
+            subscriber["active"] = True
+            subscriber["updated_at"] = now_iso()
+            subscriber.setdefault("source", "env")
+            subscriber.setdefault("name", "Propietario")
+            subscriber.setdefault("username", "")
+            return
+
+    subscribers.append(
+        build_subscriber(
+            chat_id=str(default_chat_id),
+            name="Propietario",
+            username=None,
+            active=True,
+            source="env",
+        )
+    )
+
+
+def get_active_chat_ids(subscribers: list[dict]) -> list[str]:
+    return [str(subscriber["chat_id"]) for subscriber in subscribers if subscriber.get("active")]
+
+
+def extract_user_data(message: dict) -> tuple[str, str, str | None] | None:
+    chat = message.get("chat") or {}
+    chat_id = chat.get("id")
+    if chat_id is None:
+        return None
+
+    user = message.get("from") or {}
+    first_name = (user.get("first_name") or "").strip()
+    last_name = (user.get("last_name") or "").strip()
+    full_name = " ".join(part for part in [first_name, last_name] if part).strip()
+    username = user.get("username")
+    return str(chat_id), full_name or username or str(chat_id), username
+
+
+def process_subscription_updates(bot_token: str, subscribers_path: str, state_path: str, default_chat_id: str | None) -> list[dict]:
+    subscribers_data = load_json_file(subscribers_path, {"subscribers": []})
+    state_data = load_json_file(state_path, {"last_update_id": 0})
+
+    subscribers = subscribers_data.setdefault("subscribers", [])
+    ensure_default_subscriber(subscribers, default_chat_id)
+
+    updates = telegram_api_request(
+        bot_token,
+        "getUpdates",
+        {"offset": int(state_data.get("last_update_id", 0)) + 1, "timeout": 0, "allowed_updates": json.dumps(["message"])},
+    )
+
+    max_update_id = int(state_data.get("last_update_id", 0))
+    for update in updates.get("result", []):
+        update_id = int(update.get("update_id", 0))
+        max_update_id = max(max_update_id, update_id)
+        message = update.get("message") or {}
+        text = (message.get("text") or "").strip()
+        if not text.startswith("/"):
+            continue
+
+        user_data = extract_user_data(message)
+        if user_data is None:
+            continue
+
+        chat_id, name, username = user_data
+        command = normalize_command(text)
+        if command == "/start":
+            upsert_subscriber(subscribers, chat_id=chat_id, name=name, username=username, active=True, source="telegram")
+        elif command == "/stop":
+            upsert_subscriber(subscribers, chat_id=chat_id, name=name, username=username, active=False, source="telegram")
+
+    state_data["last_update_id"] = max_update_id
+    save_json_file(subscribers_path, subscribers_data)
+    save_json_file(state_path, state_data)
+    return subscribers
+
+
+def telegram_api_request(bot_token: str, method: str, params: dict[str, object]) -> dict:
+    payload = urllib.parse.urlencode(params).encode("utf-8")
+    endpoint = f"https://api.telegram.org/bot{bot_token}/{method}"
     request = urllib.request.Request(
         endpoint,
         data=payload,
@@ -198,7 +320,21 @@ def send_telegram_message(bot_token: str, chat_id: str, text: str) -> None:
 
     parsed = json.loads(response_body)
     if not parsed.get("ok"):
-        raise RuntimeError(f"Telegram API devolvio un error: {response_body}")
+        raise RuntimeError(f"Telegram API devolvio un error en {method}: {response_body}")
+    return parsed
+
+
+def send_telegram_message(bot_token: str, chat_id: str, text: str) -> None:
+    telegram_api_request(
+        bot_token,
+        "sendMessage",
+        {
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": "true",
+        },
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -209,6 +345,16 @@ def parse_args() -> argparse.Namespace:
         "--env-file",
         default=os.getenv("COMEDOR_ENV_FILE", DEFAULT_ENV_PATH),
         help="Ruta al fichero de variables de entorno. Por defecto usa .env en el directorio actual.",
+    )
+    parser.add_argument(
+        "--subscribers-file",
+        default=os.getenv("COMEDOR_SUBSCRIBERS_FILE", DEFAULT_SUBSCRIBERS_PATH),
+        help="Ruta al fichero JSON de suscriptores.",
+    )
+    parser.add_argument(
+        "--state-file",
+        default=os.getenv("COMEDOR_STATE_FILE", DEFAULT_STATE_PATH),
+        help="Ruta al fichero JSON con el ultimo update_id procesado.",
     )
     parser.add_argument("--url", default=os.getenv("COMEDOR_MENU_URL", DEFAULT_MENU_URL))
     parser.add_argument(
@@ -245,8 +391,22 @@ def main() -> int:
         if not bot_token or not chat_id:
             raise RuntimeError("Faltan TELEGRAM_BOT_TOKEN y/o TELEGRAM_CHAT_ID en el entorno.")
 
-        send_telegram_message(bot_token, chat_id, message)
-        print(f"Mensaje enviado para {target_date.isoformat()}.")
+        subscribers = process_subscription_updates(
+            bot_token=bot_token,
+            subscribers_path=args.subscribers_file,
+            state_path=args.state_file,
+            default_chat_id=chat_id,
+        )
+        active_chat_ids = get_active_chat_ids(subscribers)
+        if not active_chat_ids:
+            raise RuntimeError("No hay suscriptores activos para enviar el menu.")
+
+        sent_count = 0
+        for recipient_chat_id in active_chat_ids:
+            send_telegram_message(bot_token, recipient_chat_id, message)
+            sent_count += 1
+
+        print(f"Mensaje enviado para {target_date.isoformat()} a {sent_count} suscriptor(es).")
         return 0
     except urllib.error.HTTPError as exc:
         print(f"Error HTTP: {exc.code} {exc.reason}", file=sys.stderr)

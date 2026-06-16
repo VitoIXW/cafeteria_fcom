@@ -1,6 +1,14 @@
 from datetime import date
 
-from comedor_bot import build_message, find_day_menu, load_env_file, parse_weekly_menu, strip_html_for_console
+from comedor_bot import (
+    build_message,
+    find_day_menu,
+    get_active_chat_ids,
+    load_env_file,
+    parse_weekly_menu,
+    process_subscription_updates,
+    strip_html_for_console,
+)
 
 SAMPLE_HTML = """
 <div class="field-item even">
@@ -79,3 +87,71 @@ def test_load_env_file_sets_missing_values(tmp_path, monkeypatch):
 
     assert "abc" == __import__("os").environ["TELEGRAM_BOT_TOKEN"]
     assert "123" == __import__("os").environ["TELEGRAM_CHAT_ID"]
+
+
+def test_process_subscription_updates_registers_start_and_stop(tmp_path, monkeypatch):
+    subscribers_path = tmp_path / "subscribers.json"
+    state_path = tmp_path / "bot_state.json"
+
+    updates_payload = {
+        "ok": True,
+        "result": [
+            {
+                "update_id": 101,
+                "message": {
+                    "text": "/start",
+                    "chat": {"id": 111},
+                    "from": {"first_name": "Ana", "last_name": "Lopez", "username": "ana"},
+                },
+            },
+            {
+                "update_id": 102,
+                "message": {
+                    "text": "/stop",
+                    "chat": {"id": 222},
+                    "from": {"first_name": "Luis", "username": "luis"},
+                },
+            },
+        ],
+    }
+
+    def fake_telegram_api_request(bot_token, method, params):
+        assert bot_token == "token"
+        assert method == "getUpdates"
+        assert params["offset"] == 1
+        return updates_payload
+
+    monkeypatch.setattr("comedor_bot.telegram_api_request", fake_telegram_api_request)
+
+    subscribers = process_subscription_updates(
+        bot_token="token",
+        subscribers_path=str(subscribers_path),
+        state_path=str(state_path),
+        default_chat_id="999",
+    )
+
+    assert get_active_chat_ids(subscribers) == ["999", "111"]
+    assert any(item["chat_id"] == "111" and item["name"] == "Ana Lopez" and item["active"] for item in subscribers)
+    assert any(item["chat_id"] == "222" and item["name"] == "Luis" and not item["active"] for item in subscribers)
+    assert __import__("json").loads(state_path.read_text(encoding="utf-8"))["last_update_id"] == 102
+
+
+def test_process_subscription_updates_uses_existing_offset(tmp_path, monkeypatch):
+    subscribers_path = tmp_path / "subscribers.json"
+    state_path = tmp_path / "bot_state.json"
+    state_path.write_text('{"last_update_id": 40}\n', encoding="utf-8")
+
+    def fake_telegram_api_request(bot_token, method, params):
+        assert params["offset"] == 41
+        return {"ok": True, "result": []}
+
+    monkeypatch.setattr("comedor_bot.telegram_api_request", fake_telegram_api_request)
+
+    subscribers = process_subscription_updates(
+        bot_token="token",
+        subscribers_path=str(subscribers_path),
+        state_path=str(state_path),
+        default_chat_id="999",
+    )
+
+    assert get_active_chat_ids(subscribers) == ["999"]
