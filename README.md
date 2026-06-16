@@ -13,15 +13,16 @@ Eso permite sacar el menú sin navegador ni JavaScript.
 ## Uso local
 
 ```bash
+cp .env.example .env
 python3 comedor_bot.py --dry-run
 python3 comedor_bot.py --date 2026-06-16 --dry-run
 ```
 
-Para enviar a Telegram:
+El script lee automáticamente un fichero `.env` en la raíz del proyecto. Un ejemplo está en [.env.example](/home/alfredo/repositorios/comedor/.env.example).
+
+Para enviar a Telegram, rellena tu `.env`:
 
 ```bash
-export TELEGRAM_BOT_TOKEN="123456:ABCDEF"
-export TELEGRAM_CHAT_ID="123456789"
 python3 comedor_bot.py
 ```
 
@@ -29,16 +30,32 @@ Variables opcionales:
 
 - `COMEDOR_MENU_URL`: cambia la URL fuente.
 - `COMEDOR_TARGET_DATE`: fecha objetivo en `YYYY-MM-DD`.
+- `COMEDOR_ENV_FILE`: ruta de un fichero de variables alternativo.
+
+## Formato del mensaje
+
+El mensaje se envía con formato HTML de Telegram:
+
+- cabecera con fecha
+- campus y semana
+- bloques separados para primer plato, segundo plato y postre
+- enlace a la fuente
+
+En `--dry-run` el script imprime una vista legible en consola.
 
 ## Cron
 
 Ejemplo de `crontab -e` para lanzarlo de lunes a viernes a las 07:00:
 
 ```cron
-0 7 * * 1-5 cd /home/alfredo/repositorios/comedor && /usr/bin/env TELEGRAM_BOT_TOKEN="123456:ABCDEF" TELEGRAM_CHAT_ID="123456789" /usr/bin/python3 /home/alfredo/repositorios/comedor/comedor_bot.py >> /tmp/comedor_bot.log 2>&1
+0 7 * * 1-5 cd /home/alfredo/repositorios/comedor && /usr/bin/python3 /home/alfredo/repositorios/comedor/comedor_bot.py >> /tmp/comedor_bot.log 2>&1
 ```
 
-Si prefieres no meter secretos directamente en crontab, crea un fichero de entorno y haz que cron lo cargue antes de ejecutar el script.
+Si prefieres guardar el fichero en otra ruta:
+
+```cron
+0 7 * * 1-5 cd /home/alfredo/repositorios/comedor && /usr/bin/python3 /home/alfredo/repositorios/comedor/comedor_bot.py --env-file /ruta/privada/comedor.env >> /tmp/comedor_bot.log 2>&1
+```
 
 ## Notas de robustez
 

@@ -1,6 +1,6 @@
 from datetime import date
 
-from comedor_bot import build_message, find_day_menu, parse_weekly_menu
+from comedor_bot import build_message, find_day_menu, load_env_file, parse_weekly_menu, strip_html_for_console
 
 SAMPLE_HTML = """
 <div class="field-item even">
@@ -45,10 +45,11 @@ def test_build_message_for_existing_day():
 
     message = build_message(weekly_menu, day_menu, date(2026, 6, 16), "https://sacu.us.es/menuSemanal?i=1")
 
-    assert "Menu comedor US - 16/06/2026" in message
-    assert "Primer plato:\n- Ensalada de pasta\n- Guisantes" in message
-    assert "Segundo plato:\n- Filete de cerdo en salsa verde\n- Fritura de boquerones" in message
-    assert "Postre:\n- Fruta fresca\n- Postre casero/lácteo" in message
+    assert "<b>Menu comedor US</b> - 16/06/2026" in message
+    assert "<b>Primer plato</b>\n• Ensalada de pasta\n• Guisantes" in message
+    assert "<b>Segundo plato</b>\n• Filete de cerdo en salsa verde\n• Fritura de boquerones" in message
+    assert "<b>Postre</b>\n• Fruta fresca\n• Postre casero/lácteo" in message
+    assert "<a href=\"https://sacu.us.es/menuSemanal?i=1\">Fuente</a>" in message
 
 
 def test_build_message_when_day_is_missing():
@@ -56,4 +57,25 @@ def test_build_message_when_day_is_missing():
 
     message = build_message(weekly_menu, None, date(2026, 6, 20), "https://sacu.us.es/menuSemanal?i=1")
 
-    assert "No hay menu publicado para esa fecha." in message
+    assert "<i>No hay menu publicado para esa fecha.</i>" in message
+
+
+def test_strip_html_for_console_keeps_readable_preview():
+    text = strip_html_for_console("<b>Primer plato</b>\n• Ensalada\n• Gazpacho\n\n<a href=\"https://example.com\">Fuente</a>")
+
+    assert "Primer plato" in text
+    assert "• Ensalada" in text
+    assert "Fuente" in text
+
+
+def test_load_env_file_sets_missing_values(tmp_path, monkeypatch):
+    env_path = tmp_path / ".env"
+    env_path.write_text('TELEGRAM_BOT_TOKEN="abc"\nexport TELEGRAM_CHAT_ID=123\n', encoding="utf-8")
+
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
+
+    load_env_file(str(env_path))
+
+    assert "abc" == __import__("os").environ["TELEGRAM_BOT_TOKEN"]
+    assert "123" == __import__("os").environ["TELEGRAM_CHAT_ID"]

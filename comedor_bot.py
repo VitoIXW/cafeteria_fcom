@@ -16,6 +16,7 @@ from typing import Iterable
 
 DEFAULT_MENU_URL = "https://sacu.us.es/menuSemanal?i=1"
 USER_AGENT = "comedor-bot/1.0 (+https://sacu.us.es/menuSemanal?i=1)"
+DEFAULT_ENV_PATH = ".env"
 
 
 @dataclass(frozen=True)
@@ -113,6 +114,19 @@ def format_section(title: str, items: Iterable[str]) -> str:
     return "\n".join(lines)
 
 
+def format_html_section(title: str, items: Iterable[str]) -> str:
+    escaped_items = [html.escape(item) for item in items]
+    return "\n".join([f"<b>{html.escape(title)}</b>"] + [f"• {item}" for item in escaped_items])
+
+
+def strip_html_for_console(text: str) -> str:
+    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"</p>\s*<p>", "\n\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"</div>\s*<div>", "\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"<[^>]+>", "", text)
+    return html.unescape(text).strip()
+
+
 def find_day_menu(weekly_menu: WeeklyMenu, target_date: date) -> DayMenu | None:
     for day_menu in weekly_menu.days:
         if day_menu.menu_date == target_date:
@@ -121,21 +135,42 @@ def find_day_menu(weekly_menu: WeeklyMenu, target_date: date) -> DayMenu | None:
 
 
 def build_message(weekly_menu: WeeklyMenu, day_menu: DayMenu | None, target_date: date, source_url: str) -> str:
-    header = f"Menu comedor US - {target_date.strftime('%d/%m/%Y')}"
-    location = f"{weekly_menu.campus}\n{weekly_menu.week_label}"
+    header = f"🍽️ <b>Menu comedor US</b> - {target_date.strftime('%d/%m/%Y')}"
+    location = f"📍 {html.escape(weekly_menu.campus)}\n🗓️ {html.escape(weekly_menu.week_label)}"
 
     if day_menu is None:
-        body = "No hay menu publicado para esa fecha."
+        body = "<i>No hay menu publicado para esa fecha.</i>"
     else:
         body = "\n\n".join(
             [
-                format_section("Primer plato", day_menu.first_courses),
-                format_section("Segundo plato", day_menu.second_courses),
-                format_section("Postre", day_menu.desserts),
+                format_html_section("Primer plato", day_menu.first_courses),
+                format_html_section("Segundo plato", day_menu.second_courses),
+                format_html_section("Postre", day_menu.desserts),
             ]
         )
 
-    return f"{header}\n{location}\n\n{body}\n\nFuente: {source_url}"
+    return f"{header}\n{location}\n\n{body}\n\n<a href=\"{html.escape(source_url, quote=True)}\">Fuente</a>"
+
+
+def load_env_file(env_path: str) -> None:
+    if not os.path.exists(env_path):
+        return
+
+    with open(env_path, "r", encoding="utf-8") as env_file:
+        for raw_line in env_file:
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("export "):
+                line = line[len("export ") :].strip()
+            if "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+                value = value[1:-1]
+            os.environ.setdefault(key, value)
 
 
 def send_telegram_message(bot_token: str, chat_id: str, text: str) -> None:
@@ -143,6 +178,7 @@ def send_telegram_message(bot_token: str, chat_id: str, text: str) -> None:
         {
             "chat_id": chat_id,
             "text": text,
+            "parse_mode": "HTML",
             "disable_web_page_preview": "true",
         }
     ).encode("utf-8")
@@ -169,6 +205,11 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Extrae el menu diario del comedor de la Universidad de Sevilla y lo envia por Telegram."
     )
+    parser.add_argument(
+        "--env-file",
+        default=os.getenv("COMEDOR_ENV_FILE", DEFAULT_ENV_PATH),
+        help="Ruta al fichero de variables de entorno. Por defecto usa .env en el directorio actual.",
+    )
     parser.add_argument("--url", default=os.getenv("COMEDOR_MENU_URL", DEFAULT_MENU_URL))
     parser.add_argument(
         "--date",
@@ -189,13 +230,14 @@ def main() -> int:
     args = parse_args()
 
     try:
+        load_env_file(args.env_file)
         target_date = resolve_target_date(args.date)
         weekly_menu = parse_weekly_menu(fetch_url(args.url))
         day_menu = find_day_menu(weekly_menu, target_date)
         message = build_message(weekly_menu, day_menu, target_date, args.url)
 
         if args.dry_run:
-            print(message)
+            print(strip_html_for_console(message))
             return 0
 
         bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
