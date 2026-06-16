@@ -1,0 +1,221 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import html
+import json
+import os
+import re
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+from dataclasses import dataclass
+from datetime import date, datetime
+from typing import Iterable
+
+DEFAULT_MENU_URL = "https://sacu.us.es/menuSemanal?i=1"
+USER_AGENT = "comedor-bot/1.0 (+https://sacu.us.es/menuSemanal?i=1)"
+
+
+@dataclass(frozen=True)
+class DayMenu:
+    label: str
+    menu_date: date
+    first_courses: list[str]
+    second_courses: list[str]
+    desserts: list[str]
+
+
+@dataclass(frozen=True)
+class WeeklyMenu:
+    campus: str
+    week_label: str
+    days: list[DayMenu]
+
+
+def fetch_url(url: str) -> str:
+    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    with urllib.request.urlopen(request, timeout=30) as response:
+        return response.read().decode("utf-8", errors="replace")
+
+
+def strip_tags(fragment: str) -> str:
+    text = re.sub(r"<br\s*/?>", "\n", fragment, flags=re.IGNORECASE)
+    text = re.sub(r"<[^>]+>", "", text)
+    text = html.unescape(text)
+    lines = [re.sub(r"\s+", " ", line).strip() for line in text.splitlines()]
+    return "\n".join(line for line in lines if line)
+
+
+def split_menu_lines(cell_html: str) -> list[str]:
+    text = strip_tags(cell_html)
+    items: list[str] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        items.append(re.sub(r"^-\s*", "", line).strip())
+    return items
+
+
+def parse_weekly_menu(page_html: str) -> WeeklyMenu:
+    table_match = re.search(r"<table>(.*?)</table>", page_html, flags=re.IGNORECASE | re.DOTALL)
+    if not table_match:
+        raise ValueError("No se ha encontrado la estructura esperada del menú semanal.")
+
+    header_html = page_html[: table_match.start()]
+    campus_matches = re.findall(r"<h3>(.*?)</h3>", header_html, flags=re.IGNORECASE | re.DOTALL)
+    week_matches = re.findall(r"<h4>(.*?)</h4>", header_html, flags=re.IGNORECASE | re.DOTALL)
+
+    if not campus_matches or not week_matches:
+        raise ValueError("No se ha encontrado la estructura esperada del menú semanal.")
+
+    campus = strip_tags(campus_matches[-1])
+    week_label = strip_tags(week_matches[-1])
+    table_html = table_match.group(1)
+
+    row_pattern = re.compile(
+        r'<tr>\s*<th[^>]*colspan=3[^>]*>(.*?)</th>\s*</tr>\s*'
+        r'<tr>\s*<th[^>]*>.*?</th>\s*<th[^>]*>.*?</th>\s*<th[^>]*>.*?</th>\s*</tr>\s*'
+        r'<tr>\s*<td>(.*?)</td>\s*<td>(.*?)</td>\s*<td>(.*?)</td>\s*</tr>',
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+
+    days: list[DayMenu] = []
+    for header_html, first_html, second_html, dessert_html in row_pattern.findall(table_html):
+        header_text = strip_tags(header_html)
+        date_match = re.search(r"(\d{2}/\d{2}/\d{4})", header_text)
+        if not date_match:
+            continue
+
+        parsed_date = datetime.strptime(date_match.group(1), "%d/%m/%Y").date()
+        day_label = header_text[: header_text.find(date_match.group(1))].strip()
+        days.append(
+            DayMenu(
+                label=day_label,
+                menu_date=parsed_date,
+                first_courses=split_menu_lines(first_html),
+                second_courses=split_menu_lines(second_html),
+                desserts=split_menu_lines(dessert_html),
+            )
+        )
+
+    if not days:
+        raise ValueError("No se han podido extraer los días del menú semanal.")
+
+    return WeeklyMenu(campus=campus, week_label=week_label, days=days)
+
+
+def format_section(title: str, items: Iterable[str]) -> str:
+    lines = [f"{title}:"]
+    lines.extend(f"- {item}" for item in items)
+    return "\n".join(lines)
+
+
+def find_day_menu(weekly_menu: WeeklyMenu, target_date: date) -> DayMenu | None:
+    for day_menu in weekly_menu.days:
+        if day_menu.menu_date == target_date:
+            return day_menu
+    return None
+
+
+def build_message(weekly_menu: WeeklyMenu, day_menu: DayMenu | None, target_date: date, source_url: str) -> str:
+    header = f"Menu comedor US - {target_date.strftime('%d/%m/%Y')}"
+    location = f"{weekly_menu.campus}\n{weekly_menu.week_label}"
+
+    if day_menu is None:
+        body = "No hay menu publicado para esa fecha."
+    else:
+        body = "\n\n".join(
+            [
+                format_section("Primer plato", day_menu.first_courses),
+                format_section("Segundo plato", day_menu.second_courses),
+                format_section("Postre", day_menu.desserts),
+            ]
+        )
+
+    return f"{header}\n{location}\n\n{body}\n\nFuente: {source_url}"
+
+
+def send_telegram_message(bot_token: str, chat_id: str, text: str) -> None:
+    payload = urllib.parse.urlencode(
+        {
+            "chat_id": chat_id,
+            "text": text,
+            "disable_web_page_preview": "true",
+        }
+    ).encode("utf-8")
+    endpoint = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    request = urllib.request.Request(
+        endpoint,
+        data=payload,
+        headers={
+            "Content-Type": "application/x-www-form-urlencoded",
+            "User-Agent": USER_AGENT,
+        },
+        method="POST",
+    )
+
+    with urllib.request.urlopen(request, timeout=30) as response:
+        response_body = response.read().decode("utf-8", errors="replace")
+
+    parsed = json.loads(response_body)
+    if not parsed.get("ok"):
+        raise RuntimeError(f"Telegram API devolvio un error: {response_body}")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Extrae el menu diario del comedor de la Universidad de Sevilla y lo envia por Telegram."
+    )
+    parser.add_argument("--url", default=os.getenv("COMEDOR_MENU_URL", DEFAULT_MENU_URL))
+    parser.add_argument(
+        "--date",
+        default=os.getenv("COMEDOR_TARGET_DATE"),
+        help="Fecha objetivo en formato YYYY-MM-DD. Por defecto usa la fecha local del sistema.",
+    )
+    parser.add_argument("--dry-run", action="store_true", help="Imprime el mensaje en stdout sin enviarlo a Telegram.")
+    return parser.parse_args()
+
+
+def resolve_target_date(raw_date: str | None) -> date:
+    if not raw_date:
+        return date.today()
+    return datetime.strptime(raw_date, "%Y-%m-%d").date()
+
+
+def main() -> int:
+    args = parse_args()
+
+    try:
+        target_date = resolve_target_date(args.date)
+        weekly_menu = parse_weekly_menu(fetch_url(args.url))
+        day_menu = find_day_menu(weekly_menu, target_date)
+        message = build_message(weekly_menu, day_menu, target_date, args.url)
+
+        if args.dry_run:
+            print(message)
+            return 0
+
+        bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
+        chat_id = os.getenv("TELEGRAM_CHAT_ID")
+        if not bot_token or not chat_id:
+            raise RuntimeError("Faltan TELEGRAM_BOT_TOKEN y/o TELEGRAM_CHAT_ID en el entorno.")
+
+        send_telegram_message(bot_token, chat_id, message)
+        print(f"Mensaje enviado para {target_date.isoformat()}.")
+        return 0
+    except urllib.error.HTTPError as exc:
+        print(f"Error HTTP: {exc.code} {exc.reason}", file=sys.stderr)
+    except urllib.error.URLError as exc:
+        print(f"Error de red: {exc.reason}", file=sys.stderr)
+    except ValueError as exc:
+        print(f"Error de parseo: {exc}", file=sys.stderr)
+    except Exception as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+    return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
