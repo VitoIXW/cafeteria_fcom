@@ -263,9 +263,38 @@ def extract_user_data(message: dict) -> tuple[str, str, str | None] | None:
     return str(chat_id), full_name or username or str(chat_id), username
 
 
+def delete_telegram_message(bot_token: str, chat_id: str, message_id: int) -> None:
+    telegram_api_request(
+        bot_token,
+        "deleteMessage",
+        {
+            "chat_id": chat_id,
+            "message_id": message_id,
+        },
+    )
+
+
+def get_last_sent_message_id(state_data: dict, chat_id: str) -> int | None:
+    sent_messages = state_data.setdefault("sent_messages", {})
+    raw_value = sent_messages.get(str(chat_id))
+    if raw_value is None:
+        return None
+    return int(raw_value)
+
+
+def set_last_sent_message_id(state_data: dict, chat_id: str, message_id: int) -> None:
+    sent_messages = state_data.setdefault("sent_messages", {})
+    sent_messages[str(chat_id)] = int(message_id)
+
+
+def clear_last_sent_message_id(state_data: dict, chat_id: str) -> None:
+    sent_messages = state_data.setdefault("sent_messages", {})
+    sent_messages.pop(str(chat_id), None)
+
+
 def process_subscription_updates(bot_token: str, subscribers_path: str, state_path: str, default_chat_id: str | None) -> list[dict]:
     subscribers_data = load_json_file(subscribers_path, {"subscribers": []})
-    state_data = load_json_file(state_path, {"last_update_id": 0})
+    state_data = load_json_file(state_path, {"last_update_id": 0, "sent_messages": {}})
 
     subscribers = subscribers_data.setdefault("subscribers", [])
     ensure_default_subscriber(subscribers, default_chat_id)
@@ -324,8 +353,8 @@ def telegram_api_request(bot_token: str, method: str, params: dict[str, object])
     return parsed
 
 
-def send_telegram_message(bot_token: str, chat_id: str, text: str) -> None:
-    telegram_api_request(
+def send_telegram_message(bot_token: str, chat_id: str, text: str) -> int:
+    response = telegram_api_request(
         bot_token,
         "sendMessage",
         {
@@ -335,6 +364,28 @@ def send_telegram_message(bot_token: str, chat_id: str, text: str) -> None:
             "disable_web_page_preview": "true",
         },
     )
+    result = response.get("result") or {}
+    return int(result["message_id"])
+
+
+def send_menu_to_subscribers(bot_token: str, state_path: str, chat_ids: list[str], text: str) -> int:
+    state_data = load_json_file(state_path, {"last_update_id": 0, "sent_messages": {}})
+    sent_count = 0
+
+    for chat_id in chat_ids:
+        previous_message_id = get_last_sent_message_id(state_data, chat_id)
+        if previous_message_id is not None:
+            try:
+                delete_telegram_message(bot_token, chat_id, previous_message_id)
+            except RuntimeError:
+                clear_last_sent_message_id(state_data, chat_id)
+
+        new_message_id = send_telegram_message(bot_token, chat_id, text)
+        set_last_sent_message_id(state_data, chat_id, new_message_id)
+        sent_count += 1
+
+    save_json_file(state_path, state_data)
+    return sent_count
 
 
 def parse_args() -> argparse.Namespace:
@@ -401,11 +452,7 @@ def main() -> int:
         if not active_chat_ids:
             raise RuntimeError("No hay suscriptores activos para enviar el menu.")
 
-        sent_count = 0
-        for recipient_chat_id in active_chat_ids:
-            send_telegram_message(bot_token, recipient_chat_id, message)
-            sent_count += 1
-
+        sent_count = send_menu_to_subscribers(bot_token, args.state_file, active_chat_ids, message)
         print(f"Mensaje enviado para {target_date.isoformat()} a {sent_count} suscriptor(es).")
         return 0
     except urllib.error.HTTPError as exc:

@@ -65,6 +65,7 @@ El mensaje se envía con formato HTML de Telegram:
 - campus y semana
 - bloques separados para primer plato, segundo plato y postre
 - enlace a la fuente
+- si existe un menú anterior enviado por el bot a ese chat, intenta borrarlo antes de mandar el nuevo
 
 En `--dry-run` el script imprime una vista legible en consola.
 
@@ -86,4 +87,5 @@ Si prefieres guardar el fichero en otra ruta:
 
 - Si SACU no publica menú para la fecha consultada, el bot lo indica en vez de fallar.
 - El parser está montado sobre la tabla HTML real que publica la web.
-- Hay tests del parser, del `.env` y del registro de suscriptores en `tests/test_comedor_bot.py`.
+- El estado del bot guarda también el último `message_id` enviado por chat para poder reemplazar el menú anterior.
+- Hay tests del parser, del `.env`, del registro de suscriptores y del reemplazo de mensajes en `tests/test_comedor_bot.py`.

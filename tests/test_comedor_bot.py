@@ -4,9 +4,11 @@ from comedor_bot import (
     build_message,
     find_day_menu,
     get_active_chat_ids,
+    get_last_sent_message_id,
     load_env_file,
     parse_weekly_menu,
     process_subscription_updates,
+    send_menu_to_subscribers,
     strip_html_for_console,
 )
 
@@ -155,3 +157,51 @@ def test_process_subscription_updates_uses_existing_offset(tmp_path, monkeypatch
     )
 
     assert get_active_chat_ids(subscribers) == ["999"]
+
+
+def test_send_menu_to_subscribers_replaces_previous_messages(tmp_path, monkeypatch):
+    state_path = tmp_path / "bot_state.json"
+    state_path.write_text('{"last_update_id": 10, "sent_messages": {"111": 500}}\n', encoding="utf-8")
+    calls = []
+
+    def fake_telegram_api_request(bot_token, method, params):
+        calls.append((method, params))
+        if method == "deleteMessage":
+            return {"ok": True, "result": True}
+        if method == "sendMessage":
+            if params["chat_id"] == "111":
+                return {"ok": True, "result": {"message_id": 700}}
+            return {"ok": True, "result": {"message_id": 800}}
+        raise AssertionError(method)
+
+    monkeypatch.setattr("comedor_bot.telegram_api_request", fake_telegram_api_request)
+
+    sent_count = send_menu_to_subscribers("token", str(state_path), ["111", "222"], "hola")
+
+    assert sent_count == 2
+    assert calls[0] == ("deleteMessage", {"chat_id": "111", "message_id": 500})
+    assert calls[1][0] == "sendMessage"
+    assert calls[2][0] == "sendMessage"
+
+    saved_state = __import__("json").loads(state_path.read_text(encoding="utf-8"))
+    assert get_last_sent_message_id(saved_state, "111") == 700
+    assert get_last_sent_message_id(saved_state, "222") == 800
+
+
+def test_send_menu_to_subscribers_clears_missing_previous_message(tmp_path, monkeypatch):
+    state_path = tmp_path / "bot_state.json"
+    state_path.write_text('{"last_update_id": 10, "sent_messages": {"111": 500}}\n', encoding="utf-8")
+
+    def fake_telegram_api_request(bot_token, method, params):
+        if method == "deleteMessage":
+            raise RuntimeError("message not found")
+        if method == "sendMessage":
+            return {"ok": True, "result": {"message_id": 701}}
+        raise AssertionError(method)
+
+    monkeypatch.setattr("comedor_bot.telegram_api_request", fake_telegram_api_request)
+
+    send_menu_to_subscribers("token", str(state_path), ["111"], "hola")
+
+    saved_state = __import__("json").loads(state_path.read_text(encoding="utf-8"))
+    assert get_last_sent_message_id(saved_state, "111") == 701
