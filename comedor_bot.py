@@ -14,8 +14,8 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Iterable
 
-DEFAULT_MENU_URL = "https://sacu.us.es/menuSemanal?i=1"
-USER_AGENT = "comedor-bot/1.0 (+https://sacu.us.es/menuSemanal?i=1)"
+DEFAULT_MENU_URL = "https://servicio.us.es/sacu/menuSemanal?i=1"
+USER_AGENT = "comedor-bot/1.0 (+https://servicio.us.es/sacu/menuSemanal?i=1)"
 DEFAULT_ENV_PATH = ".env"
 DEFAULT_SUBSCRIBERS_PATH = "subscribers.json"
 DEFAULT_STATE_PATH = "bot_state.json"
@@ -344,8 +344,17 @@ def telegram_api_request(bot_token: str, method: str, params: dict[str, object])
         method="POST",
     )
 
-    with urllib.request.urlopen(request, timeout=30) as response:
-        response_body = response.read().decode("utf-8", errors="replace")
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            response_body = response.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        response_body = exc.read().decode("utf-8", errors="replace")
+        try:
+            parsed = json.loads(response_body)
+            description = parsed.get("description") or response_body
+        except json.JSONDecodeError:
+            description = response_body or exc.reason
+        raise RuntimeError(f"Telegram API devolvio un error en {method}: {description}") from exc
 
     parsed = json.loads(response_body)
     if not parsed.get("ok"):
@@ -377,7 +386,7 @@ def send_menu_to_subscribers(bot_token: str, state_path: str, chat_ids: list[str
         if previous_message_id is not None:
             try:
                 delete_telegram_message(bot_token, chat_id, previous_message_id)
-            except RuntimeError:
+            except Exception:
                 clear_last_sent_message_id(state_data, chat_id)
 
         new_message_id = send_telegram_message(bot_token, chat_id, text)

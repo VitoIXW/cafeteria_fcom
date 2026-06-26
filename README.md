@@ -1,6 +1,6 @@
 # Bot del comedor US
 
-Script en Python para leer el menú diario del comedor de la Universidad de Sevilla desde `https://sacu.us.es/menuSemanal?i=1` y enviarlo por Telegram. Está pensado para ejecutarse desde `cron` a las 07:00.
+Script en Python para leer el menú diario del comedor de la Universidad de Sevilla desde `https://servicio.us.es/sacu/menuSemanal?i=1` y enviarlo por Telegram. Está pensado para ejecutarse desde `cron` a las 07:00.
 
 Ahora también puede mantener una lista local de suscriptores de Telegram para que el menú se envíe a varias personas.
 

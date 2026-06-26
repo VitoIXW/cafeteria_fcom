@@ -1,4 +1,5 @@
 from datetime import date
+from urllib.error import HTTPError
 
 from comedor_bot import (
     build_message,
@@ -10,6 +11,7 @@ from comedor_bot import (
     process_subscription_updates,
     send_menu_to_subscribers,
     strip_html_for_console,
+    telegram_api_request,
 )
 
 SAMPLE_HTML = """
@@ -205,3 +207,24 @@ def test_send_menu_to_subscribers_clears_missing_previous_message(tmp_path, monk
 
     saved_state = __import__("json").loads(state_path.read_text(encoding="utf-8"))
     assert get_last_sent_message_id(saved_state, "111") == 701
+
+
+def test_telegram_api_request_includes_http_error_details(monkeypatch):
+    class FakeHttpError(HTTPError):
+        def __init__(self):
+            super().__init__("https://example.com", 400, "Bad Request", hdrs=None, fp=None)
+
+        def read(self):
+            return b'{"ok":false,"description":"Bad Request: message to delete not found"}'
+
+    def fake_urlopen(request, timeout):
+        raise FakeHttpError()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    try:
+        telegram_api_request("token", "deleteMessage", {"chat_id": "1", "message_id": 2})
+    except RuntimeError as exc:
+        assert "message to delete not found" in str(exc)
+    else:
+        raise AssertionError("Se esperaba RuntimeError")
